@@ -1,0 +1,27 @@
+
+# Large data directories - not tracked
+
+Data/
+
+Genome/
+
+Raw_Files/
+
+slurmlogs/
+
+
+
+# Log/output file types (in case any slip into Scripts/)
+
+*.out
+
+*.err
+
+*.log
+
+*.sam
+
+*.bam
+
+*.fastq.gz
+
