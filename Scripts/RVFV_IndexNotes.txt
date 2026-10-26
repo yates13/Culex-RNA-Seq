@@ -1,0 +1,16 @@
+# Make the Index Directory
+   mkdir -p /scratch/alpine/c832500103@colostate.edu/RNA_Seq/Genome/Index_RVFV
+   cd /scratch/alpine/c832500103@colostate.edu/RNA_Seq/Genome/Index_RVFV
+
+# Pull RVFV L,S,M segments from NCBI
+   curl -o RVFV_all.fasta \
+     "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=NC_014397,NC_014396,NC_014395&rettype=fasta&retmode=text"
+
+#check the sequence to make sure its the right length
+   grep ">" RVFV_all.fasta
+   awk '/^>/{if(n)print n,l; n=$1; l=0; next}{l+=length($0)}END{print n,l}' RVFV_all.fasta
+
+# Activate the Env
+   source /scratch/alpine/.colostate.edu/c832500103/miniconda3/etc/profile.d/conda.sh
+   conda activate /scratch/alpine/.colostate.edu/c832500103/conda_envs/hisat2_env
+   hisat2-build -p 4 RVFV_all.fasta RVFV_index
