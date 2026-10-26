@@ -62,6 +62,36 @@
 #
 #   Result: index prefix = ${BASE_DIR}/Genome/Index_RVFV/RVFV_index (HISAT_RVFV below)
 #
+# Inputs required BEFORE running (the script checks 1-4 and exits if missing):
+#   1. Trimmed paired-end FASTQs in ${TRIM_DIR}
+#      (${BASE_DIR}/Data/slurm_script/trimmed). Each sample needs an R1 and R2:
+#      <sample>_R1_001.fastq.gz and <sample>_R2_001.fastq.gz, with "trimmed"
+#      in the name. Example: trimmed.BF-RNA-D1-R1-Cxt_R1_001.fastq.gz
+#   2. Sample list ${TRIM_DIR}/CulexTrimmed.txt (see "How the array is set up")
+#   3. Cxt GENOME HISAT2 index: ${BASE_DIR}/Genome/Index_Genome/hisatIndex/
+#      CtarK1_index.*.ht2 (8 files; the prefix is CtarK1_index)
+#   4. RVFV HISAT2 index: ${BASE_DIR}/Genome/Index_RVFV/RVFV_index.*.ht2
+#      (8 files; built with the one-time setup below)
+#   5. The hisat2_env conda environment (conda_envs/hisat2_env)
+#   6. SLURM log folders slurmlogs/outlog and slurmlogs/errlog (if they are
+#      missing, SLURM cannot write the logs and the job can fail silently)
+#
+# How the array is set up with CulexTrimmed.txt:
+#   - CulexTrimmed.txt lists ONE R1 filename per line, one line per sample.
+#     Build it in the trimmed folder after trimming is finished:
+#       cd ${TRIM_DIR}
+#       ls | grep -v / | grep "_R1_001.fastq.gz" | grep "trimmed" > CulexTrimmed.txt
+#       wc -l CulexTrimmed.txt
+#   - The array task ID is the 0-indexed line number: task 0 runs line 1,
+#     task 1 runs line 2, and so on. So the array range is 0 to N-1, where
+#     N is the number of lines. For 24 samples: --array=0-23.
+#   - Test one sample first (--array=0), check the outputs, then run the
+#     rest (--array=1-23).
+#   - Regenerate CulexTrimmed.txt whenever trimmed files are added or removed.
+#     The list is sorted alphabetically, so adding samples can shift which task
+#     ID maps to which sample. Do not mix task IDs from runs that used
+#     different versions of the list.
+#
 # Notes:
 #   - Stage 2 only sees reads that did not align concordantly to Cxt, so pairs
 #     with one host-aligned mate can pass through to the RVFV/neither sets.
