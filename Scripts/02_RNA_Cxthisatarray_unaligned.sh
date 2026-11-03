@@ -12,7 +12,7 @@
 #SBATCH --mail-user=shawn.yates@colostate.edu
 
 # =============================================================================
-# 02_RNA_CxtRVFV_HisatArray.sh
+# 02_RNA_Cxthisatarray_unaligned.sh
 #
 # Purpose:
 #   SLURM array job. Each task processes one trimmed paired-end RNA-seq sample
@@ -36,6 +36,10 @@
 #   2_RVFVAligned/<sample>.sam
 #   3_NeitherAligned/<sample>unaligned_R1/R2.fastq.gz   (final "neither" set)
 #   Summaries/<sample>cxt_summary.txt, <sample>rvfv_summary.txt
+#
+#   "Aligned" = at least one mate mapped (concordant, discordant, or one-mate
+#   pairs, with both records kept in the SAM). "Unaligned" = BOTH mates
+#   unmapped. Each pair lands in exactly one output per stage.
 #
 # Usage:
 #   sbatch --array=0-<N> 02_RNA_CxtRVFV_HisatArray.sh
@@ -75,6 +79,8 @@
 #   5. The hisat2_env conda environment (conda_envs/hisat2_env)
 #   6. SLURM log folders slurmlogs/outlog and slurmlogs/errlog (if they are
 #      missing, SLURM cannot write the logs and the job can fail silently)
+#   7. samtools >= 1.10 in hisat2_env (the script checks this and exits if
+#      it is missing or too old)
 #
 # How the array is set up with CulexTrimmed.txt:
 #   - CulexTrimmed.txt lists ONE R1 filename per line, one line per sample.
@@ -93,12 +99,25 @@
 #     different versions of the list.
 #
 # Notes:
-#   - Stage 2 only sees reads that did not align concordantly to Cxt, so pairs
-#     with one host-aligned mate can pass through to the RVFV/neither sets.
+#   - HISAT2 writes a raw SAM (including unmapped records); split_sam() then
+#     separates it by SAM flags. Aligned SAM = everything except pairs with
+#     both mates unmapped (flag 12). Unaligned FASTQs = pairs with both mates
+#     unmapped. --un-conc-gz is NOT used, because it also captured discordant
+#     and one-mate-aligned pairs, which put host-mapped reads into the
+#     "unaligned" sets.
+#   - Stage 2 therefore only sees pairs with no Cxt alignment at all. A viral
+#     pair with one spuriously host-mapped mate will stay in the Cxt SAM and
+#     won't reach the RVFV/neither sets.
+#   - The raw SAM is deleted after splitting; budget scratch space for one
+#     uncompressed raw SAM per task while it runs.
+#   - Requires samtools >= 1.10 in hisat2_env (view -G).
+#   - Count check per sample: unique read names in 1_CxtAligned SAM + pairs in
+#     1_CxtUnaligned FASTQ = total input pairs. The same holds for stage 2
+#     (RVFV SAM + Neither FASTQ = Cxt-unaligned pairs).
 #   - When run through sbatch, SCRIPT_NAME resolves to "slurm_script", so the
 #     outputs land in ${BASE_DIR}/Data/slurm_script/, not a folder named after
 #     this file.
-#   - 1_CxtUnaligned/ is kept after the run (it is the full "not Cxt" set);
+#   - 1_CxtUnaligned/ is kept after the run (full "not Cxt" set);
 #     3_NeitherAligned/ is a subset of it. Delete only after counts are checked.
 # =============================================================================
 
@@ -143,7 +162,27 @@ for IDX in "${HISAT_CXT}" "${HISAT_RVFV}"; do
     fi
 done
 
+command -v samtools >/dev/null || { echo "ERROR: samtools not in hisat2_env"; exit 1; }
+samtools view --help 2>&1 | grep -q -- '-G' || { echo "ERROR: samtools too old (need >= 1.10 for view -G)"; exit 1; }
+
 mkdir -vp "${CXT_SAM_DIR}" "${CXT_UNAL_DIR}" "${RVFV_SAM_DIR}" "${NEITHER_DIR}" "${SUM_DIR}"
+
+# Split a raw HISAT2 SAM into:
+#   ALN  = all records except pairs with BOTH mates unmapped (concordant + discordant + one-mate)
+#   U1/U2 = FASTQ.gz of pairs with BOTH mates unmapped
+split_sam () {
+    set -o pipefail
+    local RAW="$1" ALN="$2" U1="$3" U2="$4"
+
+    # -G 12 excludes only records with BOTH 0x4 and 0x8 set
+    # (needs samtools >= 1.10; the unmapped mate of a one-mate-mapped pair is kept)
+    samtools view -h -G 12 "${RAW}" > "${ALN}" || return 1
+
+    samtools view -u -f 12 -F 256 "${RAW}" \
+      | samtools sort -n -u -@ "${THREADS}" -T "${RUN_DIR}/${OUT}sorttmp" - \
+      | samtools fastq -n -1 "${U1}" -2 "${U2}" -0 /dev/null -s /dev/null - \
+      || return 1
+}
 
 linenum=0
 while read -r line
@@ -156,33 +195,39 @@ do
       echo ${OUT}
 
       # ---------------- Stage 1: Cxt genome ----------------
-      echo "=== Stage 1: Cxt genome alignment ==="
+      RAW1="${CXT_SAM_DIR}/${OUT}.raw.sam"
       hisat2 --phred33 --rna-strandness RF -p ${THREADS} \
         -x "${HISAT_CXT}" \
         -1 "${TRIM_DIR}/${line}" -2 "${TRIM_DIR}/${TWO}" \
-        --un-conc-gz "${CXT_UNAL_DIR}/${OUT}unaligned_R%.fastq.gz" \
         --summary-file "${SUM_DIR}/${OUT}cxt_summary.txt" \
-        -S "${CXT_SAM_DIR}/${OUT}.sam" \
+        -S "${RAW1}" \
         || { echo "ERROR: Cxt hisat2 failed for ${OUT}"; exit 1; }
-      date
 
       CXT_R1="${CXT_UNAL_DIR}/${OUT}unaligned_R1.fastq.gz"
       CXT_R2="${CXT_UNAL_DIR}/${OUT}unaligned_R2.fastq.gz"
-      if [ ! -s "${CXT_R1}" ] || [ ! -s "${CXT_R2}" ]; then
-          echo "ERROR: no Cxt-unaligned FASTQs for ${OUT} (every pair aligned to Cxt?)"
-          exit 1
-      fi
+      split_sam "${RAW1}" "${CXT_SAM_DIR}/${OUT}.sam" "${CXT_R1}" "${CXT_R2}" \
+        || { echo "ERROR: Cxt split failed for ${OUT}"; exit 1; }
+      [ -f "${CXT_R1}" ] && [ -f "${CXT_R2}" ] \
+        || { echo "ERROR: missing Cxt-unaligned FASTQs for ${OUT}"; exit 1; }
+      rm -f "${RAW1}"
 
       # ---------------- Stage 2: RVFV ----------------
-      echo "=== Stage 2: RVFV alignment of Cxt-unaligned reads ==="
+      RAW2="${RVFV_SAM_DIR}/${OUT}.raw.sam"
       hisat2 --phred33 --rna-strandness RF -p ${THREADS} \
         --no-spliced-alignment \
         -x "${HISAT_RVFV}" \
         -1 "${CXT_R1}" -2 "${CXT_R2}" \
-        --un-conc-gz "${NEITHER_DIR}/${OUT}unaligned_R%.fastq.gz" \
         --summary-file "${SUM_DIR}/${OUT}rvfv_summary.txt" \
-        -S "${RVFV_SAM_DIR}/${OUT}.sam" \
+        -S "${RAW2}" \
         || { echo "ERROR: RVFV hisat2 failed for ${OUT}"; exit 1; }
+
+      split_sam "${RAW2}" "${RVFV_SAM_DIR}/${OUT}.sam" \
+        "${NEITHER_DIR}/${OUT}unaligned_R1.fastq.gz" "${NEITHER_DIR}/${OUT}unaligned_R2.fastq.gz" \
+        || { echo "ERROR: RVFV split failed for ${OUT}"; exit 1; }
+      [ -f "${NEITHER_DIR}/${OUT}unaligned_R1.fastq.gz" ] && [ -f "${NEITHER_DIR}/${OUT}unaligned_R2.fastq.gz" ] \
+        || { echo "ERROR: missing Neither FASTQs for ${OUT}"; exit 1; }
+      rm -f "${RAW2}"
+
       date
     fi
     linenum=$((linenum + 1))
